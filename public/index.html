@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dead Line Diner — Telephone ordering, back from the dead</title>
+<style>
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:#14101d;color:#f3eefc}
+  header{background:#241a38;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+  header h1{margin:0;font-size:22px} header p{margin:2px 0 0;color:#c9b8ef;font-size:13px}
+  nav button{background:#3a2b5c;color:#fff;border:1px solid #6b4fae;border-radius:8px;padding:8px 14px;margin-right:6px;cursor:pointer}
+  nav button.active{background:#8b5cf6}
+  main{max-width:960px;margin:0 auto;padding:20px}
+  .card{background:#1e1730;border:1px solid #3a2b5c;border-radius:12px;padding:16px;margin-bottom:16px}
+  .phone{font-size:28px;letter-spacing:2px;text-align:center}
+  .dial{display:flex;gap:8px;justify-content:center;margin:12px 0}
+  .dial button{font-size:20px;padding:10px 18px;border-radius:50%;border:1px solid #6b4fae;background:#2c2145;color:#fff;cursor:pointer}
+  input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #6b4fae;background:#14101d;color:#fff;margin:6px 0}
+  button.primary{background:#8b5cf6;color:#fff;border:none;border-radius:8px;padding:12px 18px;cursor:pointer;font-size:15px}
+  button.ghost{background:transparent;color:#c9b8ef;border:1px solid #6b4fae;border-radius:8px;padding:10px 14px;cursor:pointer}
+  .order{border:1px solid #6b4fae;border-radius:10px;padding:12px;margin:8px 0;background:#241a38}
+  .badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;background:#8b5cf6}
+  .badge.cooking{background:#d97706}.badge.ready{background:#059669}
+  .alert{color:#fbbf24}.err{color:#f87171}.ok{color:#34d399}
+  .menuitem{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #3a2b5c}
+  small{color:#c9b8ef}
+</style>
+</head>
+<body>
+<div id="app">
+<header>
+  <div><h1>☎️ Dead Line Diner</h1><p>Telephone ordering, back from the dead — Kiroween 2026, Resurrection</p></div>
+  <nav>
+    <button :class="{active:view==='phone'}" @click="view='phone'">📞 Call to order</button>
+    <button :class="{active:view==='kitchen'}" @click="view='kitchen'">🍳 Kitchen</button>
+    <button :class="{active:view==='owner'}" @click="view='owner'">👤 Owner</button>
+  </nav>
+</header>
+<main>
+  <!-- ============ CUSTOMER PHONE ============ -->
+  <section v-if="view==='phone'">
+    <div class="card">
+      <div class="phone">{{ callState === 'idle' ? '📞 (555) 019-DINER' : callState }}</div>
+      <p><small>Demo phone — no real PSTN call is made. Speak with your microphone (Web Speech API) or type instead. The AI only orders dishes from the menu below; it never invents a dish or a price.</small></p>
+      <div class="dial" v-if="callState==='idle'">
+        <button @click="startCall">📞 Call</button>
+      </div>
+      <div v-else>
+        <p><strong>AI:</strong> {{ aiMessage }}</p>
+        <label>Your words (speak or type):</label>
+        <textarea v-model="utterance" rows="2" placeholder='Try: "Two beef noodle soups and one bubble tea, please"'></textarea>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="primary" @click="sendUtterance">Send to AI</button>
+          <button class="ghost" @click="startListening" :disabled="!speechSupported">{{ listening ? '🎙️ Listening…' : '🎙️ Speak' }}</button>
+          <button class="ghost" @click="endCall">Hang up</button>
+        </div>
+        <p v-if="!speechSupported"><small>Microphone speech recognition is not supported in this browser — typed orders work fully.</small></p>
+        <p v-if="draft.lines.length" class="ok">Draft: {{ draft.readback }}</p>
+        <p v-if="draft.errors.length" class="err">{{ draft.errors.join('; ') }}</p>
+        <div v-if="draft.lines.length" style="display:flex;gap:8px">
+          <button class="primary" @click="confirmOrder">✅ Confirm &amp; place order</button>
+          <button class="ghost" @click="draft={lines:[],errors:[],readback:'',total:0}">Clear draft</button>
+        </div>
+        <p v-if="placed" class="ok">✅ Order {{ placed.id }} confirmed! Total ${{ placed.total.toFixed(2) }} — ETA {{ placed.etaMinutes }} min. Please keep your order number.</p>
+        <p v-if="placeError" class="err">{{ placeError }}</p>
+      </div>
+    </div>
+    <div class="card"><h3>Menu (the only source of truth)</h3>
+      <div class="menuitem" v-for="d in menu" :key="d.id">
+        <div><strong>{{ d.nameEn }}</strong> · {{ d.nameZh }}<br><small>Allergens: {{ d.allergens.join(', ') || 'none' }} <span v-if="d.outOfStock" class="err">— OUT OF STOCK</span></small></div>
+        <div>${{ d.price.toFixed(2) }}</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ KITCHEN ============ -->
+  <section v-if="view==='kitchen'">
+    <div class="card"><h3>🍳 Kitchen order wall <span class="alert" v-if="newAlert">🔔 NEW ORDER!</span></h3>
+      <p><small>Live via server-sent events. New orders arrive here the moment a caller confirms.</small></p>
+      <div v-if="!orders.length">No orders yet — place one from the phone view.</div>
+      <div class="order" v-for="o in orders" :key="o.id">
+        <strong>#{{ o.number }} {{ o.id }}</strong> <span class="badge" :class="o.status">{{ o.status }}</span>
+        <span style="float:right">${{ o.total.toFixed(2) }} · ETA {{ o.etaMinutes }} min</span>
+        <div v-for="i in o.items" :key="i.dishId">{{ i.qty }} × {{ i.nameEn }} ({{ i.nameZh }}) — ${{ (i.price*i.qty).toFixed(2) }}</div>
+        <small>{{ o.customerName }} · {{ o.channel }} · {{ new Date(o.createdAt).toLocaleString() }}</small>
+        <div v-if="o.transcript"><small>Transcript: “{{ o.transcript }}”</small></div>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="ghost" @click="setStatus(o,'cooking')">Start cooking</button>
+          <button class="ghost" @click="setStatus(o,'ready')">Mark ready</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ OWNER ============ -->
+  <section v-if="view==='owner'">
+    <div class="card"><h3>👤 Owner — menu &amp; call logs</h3>
+      <div class="menuitem" v-for="d in menu" :key="d.id">
+        <div><strong>{{ d.nameEn }}</strong> · {{ d.nameZh }} — ${{ d.price.toFixed(2) }}</div>
+        <label><input type="checkbox" :checked="d.outOfStock" @change="toggleStock(d)"> out of stock</label>
+      </div>
+    </div>
+    <div class="card"><h3>Call logs / transcripts</h3>
+      <div v-if="!calls.length"><small>No calls logged yet.</small></div>
+      <div v-for="c in calls" :key="c.id"><small>#{{ c.orderNumber }} — {{ new Date(c.createdAt).toLocaleString() }} — “{{ c.transcript }}”</small></div>
+    </div>
+    <div class="card"><h3>Order history</h3>
+      <div v-if="!orders.length"><small>No orders yet.</small></div>
+      <div v-for="o in orders" :key="o.id"><small>#{{ o.number }} — ${{ o.total.toFixed(2) }} — {{ o.status }} — {{ o.items.map(i=>i.qty+'× '+i.nameEn).join(', ') }}</small></div>
+    </div>
+  </section>
+</main>
+</div>
+<script src="/vendor/vue.global.js"></script>
+<script>
+const { createApp } = Vue;
+createApp({
+  data() {
+    return {
+      view: 'phone', menu: [], orders: [], calls: [],
+      callState: 'idle', aiMessage: '', utterance: '', listening: false,
+      draft: { lines: [], errors: [], readback: '', total: 0 },
+      placed: null, placeError: '', newAlert: false,
+      speechSupported: ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window),
+      transcript: '',
+    };
+  },
+  async mounted() {
+    await this.loadAll();
+    const es = new EventSource('/api/orders/stream');
+    es.onmessage = (e) => {
+      const ev = JSON.parse(e.data);
+      if (ev.type === 'new-order') { this.newAlert = true; setTimeout(() => this.newAlert = false, 6000); }
+      this.loadAll();
+    };
+  },
+  methods: {
+    async loadAll() {
+      const m = await fetch('/api/menu').then(r => r.json()); this.menu = m.dishes;
+      const o = await fetch('/api/orders').then(r => r.json()); this.orders = o.orders;
+      const c = await fetch('/api/calls').then(r => r.json()); this.calls = c.calls;
+    },
+    startCall() {
+      this.callState = '📞 Connected — Dead Line Diner';
+      this.aiMessage = 'Hello, Dead Line Diner! What would you like to order? Everything on the menu is available except anything marked out of stock.';
+      this.speak(this.aiMessage);
+    },
+    endCall() { this.callState = 'idle'; this.utterance = ''; this.draft = { lines: [], errors: [], readback: '', total: 0 }; this.placed = null; },
+    speak(text) {
+      if ('speechSynthesis' in window) { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(text)); }
+    },
+    startListening() {
+      const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!Rec) return;
+      const rec = new Rec(); rec.lang = 'en-US'; rec.interimResults = false;
+      this.listening = true;
+      rec.onresult = (e) => { this.utterance = e.results[0][0].transcript; this.listening = false; this.sendUtterance(); };
+      rec.onerror = () => { this.listening = false; };
+      rec.onend = () => { this.listening = false; };
+      rec.start();
+    },
+    async sendUtterance() {
+      if (!this.utterance.trim()) return;
+      this.transcript = this.transcript ? this.transcript + ' ' + this.utterance : this.utterance;
+      const res = await fetch('/api/parse', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: this.utterance }) }).then(r => r.json());
+      this.draft = { lines: res.lines || [], errors: res.errors || [], readback: res.readback || '', total: res.total || 0 };
+      if (res.unknown && res.unknown.length) this.draft.errors.push('I could not match: ' + res.unknown.join('; ') + ' — please repeat the dish name.');
+      this.aiMessage = res.readback || 'Sorry, I could not match that to the menu. Could you repeat the dish name?';
+      this.speak(this.aiMessage);
+      this.utterance = '';
+    },
+    async confirmOrder() {
+      this.placeError = '';
+      const res = await fetch('/api/orders', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ confirmed: true, channel: 'web-phone', transcript: this.transcript, items: this.draft.lines.map(l => ({ dishId: l.dishId, qty: l.qty })) }) });
+      const data = await res.json();
+      if (!res.ok) { this.placeError = (data.error || 'Order failed') + (data.details ? ': ' + data.details.join('; ') : ''); return; }
+      this.placed = data.order;
+      this.aiMessage = `Thank you! Your order ${data.order.id} is confirmed, total $${data.order.total.toFixed(2)}. It will be ready in about ${data.order.etaMinutes} minutes.`;
+      this.speak(this.aiMessage);
+      this.draft = { lines: [], errors: [], readback: '', total: 0 };
+      await this.loadAll();
+    },
+    async setStatus(order, status) {
+      await fetch(`/api/orders/${order.id}/status`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status }) });
+      await this.loadAll();
+    },
+    async toggleStock(dish) {
+      await fetch(`/api/menu/${dish.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outOfStock: !dish.outOfStock }) });
+      await this.loadAll();
+    },
+  },
+}).mount('#app');
+</script>
+</body>
+</html>

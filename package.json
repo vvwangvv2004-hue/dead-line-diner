@@ -1,0 +1,1 @@
+{"description":"Dead Line Diner — Kiroween 2026, Resurrection. Revive telephone food ordering with an AI order taker.","license":"MIT","name":"dead-line-diner","scripts":{"mcp":"node mcp-server/server.mjs","start":"node server/server.mjs","test":"node --test tests/order.test.mjs"},"type":"module","version":"0.1.0"}
